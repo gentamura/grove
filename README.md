@@ -205,4 +205,11 @@ scripts/             local build and packaging scripts
 
 ## License
 
-Grove is available under the [MIT License](LICENSE).
+Grove's source code and documentation are available under the
+[MIT License](LICENSE).
+
+The Grove name and tree icon are not licensed under MIT. Unmodified official
+builds may use and redistribute the icon, while modified versions and forks
+must use different branding. See the
+[Grove Brand and Trademark Policy](TRADEMARKS.md) and
+[brand asset terms](assets/README.md).

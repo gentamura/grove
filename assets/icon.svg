@@ -1,4 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <metadata>
+    Grove tree icon. Copyright © 2026 Gen Tamura. All rights reserved.
+    Use is governed by assets/README.md and TRADEMARKS.md.
+  </metadata>
   <defs>
     <linearGradient id="bg" x1="120" y1="80" x2="890" y2="940" gradientUnits="userSpaceOnUse">
       <stop stop-color="#22372a"/>

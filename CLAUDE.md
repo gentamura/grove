@@ -21,6 +21,8 @@ launch Claude Code, send prompts, or own terminal processes.
 - Do not replace GPUI with Tauri, React, Electron, or a webview. ADR-0002 is the
   accepted view-stack decision.
 - Do not commit `target/`, local preferences, logs, or generated app bundles.
+- Do not apply the MIT License to the Grove name or tree icon. Preserve
+  `TRADEMARKS.md`, `assets/README.md`, and the icon's copyright metadata.
 
 ## Before editing
 

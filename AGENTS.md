@@ -45,6 +45,8 @@ ADR-0001 is historical and superseded. Do not implement its Tauri/React design.
 - `docs/requirements.md`: current behavior and acceptance criteria.
 - `docs/licensing.md`: source publication and binary distribution obligations.
 - `docs/adr/`: architectural decisions and their status.
+- `TRADEMARKS.md`: permitted use of the Grove name and icon.
+- `assets/README.md`: copyright scope for Grove brand assets.
 - `scripts/build-macos.sh`: release build and local ad-hoc app signing.
 - `packaging/macos/Info.plist`: bundle metadata and minimum macOS version.
 
@@ -124,6 +126,10 @@ user's preferences.
 ### Licensing and distribution
 
 - Keep `Cargo.toml`, `LICENSE`, and the README license statement consistent.
+- Do not describe the Grove name or icon as MIT-licensed. Preserve
+  `TRADEMARKS.md`, `assets/README.md`, and the SVG copyright metadata.
+- Modified distributions and forks must replace Grove's product name and icon;
+  unmodified official builds may retain them under the brand policy.
 - Repeat the dependency license review when `Cargo.lock`, enabled features,
   supported targets, or packaging contents change.
 - Do not publish an official binary until the checklist in

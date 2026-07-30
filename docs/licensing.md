@@ -8,15 +8,22 @@ It is an engineering compliance checklist, not legal advice.
 ## Grove license
 
 Grove's original source code and documentation are released under the MIT
-License:
+License, except for the Grove name and tree icon:
 
 - `Cargo.toml` declares `license = "MIT"`.
 - The repository root contains the complete MIT text in `LICENSE`.
 - The copyright holder is identified as Gen Tamura.
+- `assets/icon.svg` and `assets/icon.icns` are explicitly excluded from MIT and
+  are governed by `TRADEMARKS.md` and `assets/README.md`.
 
 The MIT License does not require registration with a government, standards
 body, or GitHub. Publishing the repository with the license notice grants the
 permissions described by the license.
+
+The brand policy permits the Grove Marks to be used with unmodified official
+source and releases, including qualifying package-manager builds. Modified
+versions and forks remain free to use the MIT-licensed code but must adopt a
+different product name and icon.
 
 ## Current dependency review
 
@@ -52,8 +59,8 @@ Before making the repository public:
 - [x] Confirm generated output such as `target/` is ignored.
 - [ ] Review the full Git history for credentials, tokens, private session
   transcripts, personal data, and accidentally committed build artifacts.
-- [ ] Confirm the icon and every repository-owned asset may be published under
-  the project license.
+- [x] Document the Grove name and icon as separately copyrighted brand assets
+  that may be published under the conditions in `TRADEMARKS.md`.
 - [ ] Commit and push all intended documentation.
 - [ ] Recheck the GitHub repository contents and Actions history before changing
   visibility.
@@ -79,6 +86,8 @@ other compiled package:
   license identifiers, copyright/attribution notices, and source locations.
 - [ ] Include Grove's `LICENSE`, required third-party license texts, and
   `THIRD_PARTY_NOTICES` in `Grove.app/Contents/Resources`.
+- [ ] Include the applicable Grove brand notice and preserve the icon's
+  copyright metadata in official packages.
 - [ ] Check every Apache-2.0 dependency for a `NOTICE` file and preserve any
   applicable attribution notices.
 - [ ] Provide an effective source-code location for MPL-2.0 components included
