@@ -1,23 +1,23 @@
-# Feature: Claude Code Session Grove
+# Feature: Local Coding Agent Grove
 
 ## Summary
 
-A macOS desktop viewer that discovers Claude Code sessions launched in other
-terminals, presents them as leaves in a tree, and lets a developer group and
-monitor them without consuming an API key or changing the sessions.
+A macOS desktop viewer that discovers Claude Code and Codex sessions launched
+in other terminals, presents them as leaves in a tree, and lets a developer
+group and monitor them without consuming an API key or changing the sessions.
 
 ## Scope and constraints
 
 - Initial platform: macOS.
-- Initial coding agent: Claude Code authenticated through the user's existing
-  subscription/CLI installation.
-- The MVP observes external sessions; launching or controlling Claude Code is
-  out of scope.
-- Claude Code data is read-only. Grove has its own local grouping state.
+- Supported coding agents: Claude Code and Codex authenticated through the
+  user's existing subscription/CLI installations.
+- The MVP observes external sessions; launching or controlling coding agents
+  is out of scope.
+- Coding-agent data is read-only. Grove has its own local grouping state.
 - Session presence is inferred from log activity because no stable local
   presence API is assumed.
 - The view, state, scanner, and persistence layers use Rust and GPUI.
-- The design must leave room for additional agent adapters later.
+- Provider-specific storage formats are isolated behind local adapters.
 
 ## User Stories
 
@@ -97,8 +97,9 @@ not trap me in a separate workflow.
 **Acceptance Criteria:**
 
 - [x] The selected session ID can be copied.
-- [x] The exact `claude --resume <session-id>` command is shown.
-- [x] Grove does not spawn Claude Code in the MVP.
+- [x] The provider-specific `claude --resume <session-id>` or
+  `codex resume <session-id>` command is shown.
+- [x] Grove does not spawn Claude Code or Codex in the MVP.
 - [x] Clicking the Messages count lazily loads every readable user/assistant
   message from the selected JSONL transcript into a scrollable timeline.
 - [ ] A later interactive mode may resume Claude Code through a PTY-backed
@@ -166,9 +167,48 @@ a glance.
 - [x] If a status filter hides the inspected session, its detail panel closes
   and the first matching session becomes the current selection.
 
+### US-6: Switch between coding-agent providers
+
+As a developer using multiple coding agents, I want to switch between Claude
+Code, Codex, and a combined view so that each workflow remains understandable
+without running separate monitoring applications.
+
+**Acceptance Criteria:**
+
+- [x] Given standard local installations, Grove discovers Claude Code sessions
+  under `~/.claude/projects` and Codex sessions under `~/.codex/sessions` and
+  `~/.codex/archived_sessions`.
+- [x] The global provider control offers All, Claude Code, and Codex and applies
+  consistently to the Tree and Map views.
+- [x] Changing provider reconciles the current selection and closes details
+  that no longer belong to the visible result set.
+- [x] Session leaves, map nodes, details, message history, and resume commands
+  identify or follow the selected provider.
+- [x] Existing Claude Code group assignments and map offsets remain valid;
+  Codex uses provider-prefixed persistence keys to avoid collisions.
+- [x] Codex message history is loaded only when requested and includes readable
+  user and assistant response items.
+- [x] Unknown or malformed Codex records do not fail the whole scan and produce
+  the same partial-scan behavior as Claude Code records.
+- [x] Codex rollout files identified as internal subagents are not misrepresented
+  as top-level sessions when no stable parent relationship is available.
+- [x] Synthetic fixtures cover Codex discovery, status, activity, history,
+  provider keys, filtering, and internal-subagent exclusion.
+
+**Tasks:**
+
+1. Introduce a provider-aware shared session model (M) — native.
+2. Add tolerant Codex rollout discovery and parsing (M) — native.
+3. Route lazy history and resume commands by provider (S) — native/desktop.
+4. Add a global provider filter and provider labels (M) — GPUI.
+5. Preserve preference compatibility and add collision-safe Codex keys (S) —
+   persistence.
+6. Add synthetic and ignored real-data scanner coverage (S) — tests.
+
 ## Non-functional requirements
 
-- Read-only access to Claude data; no credentials or Anthropic API calls.
+- Read-only access to coding-agent data; no credentials, Anthropic API calls,
+  or OpenAI API calls.
 - Filesystem scanning occurs off the UI thread.
 - The 18 MB / 14-session reference data set should scan comfortably within the
   five-second refresh interval.
@@ -179,7 +219,7 @@ a glance.
 | Task | Size | Layer | Depends on | Definition of done |
 |---|---:|---|---|---|
 | GPUI application shell | M | Desktop | — | macOS GPUI window compiles and launches |
-| Claude JSONL adapter | M | Native | — | Unit tests and real-data scan succeed |
+| Provider adapters | M | Native | — | Claude Code and Codex unit tests and real-data scans succeed |
 | Tree/session UI | L | GPUI view | View model | Responsive at 880×620 and 1280×820 |
 | Mind-map UI | L | GPUI view | Subagent hierarchy | Root, sessions, agents, and curved connections pan, scroll, and zoom as one canvas |
 | Group persistence | S | Rust state | Tree UI | Create/move/delete survive relaunch |
@@ -191,6 +231,8 @@ a glance.
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Claude JSONL schema is internal and can change | High | Tolerant value-based parser, malformed-line skipping, adapter boundary, fixtures from observed shapes |
+| Codex rollout schema is internal and can change | High | Provider adapter, tolerant record parsing, synthetic fixtures, partial-scan warnings |
+| Codex internal subagent metadata lacks a stable parent ID | Medium | Exclude those rollouts from top-level sessions and add hierarchy only when a reliable relationship is available |
 | Log freshness is not process presence | Medium | Call status “inferred,” use conservative time windows, plan a process/PTY adapter later |
 | Full rescans become expensive with years of history | Medium | Current volume is small; add metadata cache and incremental tailing before broader rollout |
 | Prompt previews contain local project information | Medium | Keep all processing local, no network calls, truncate previews, add privacy controls later |
@@ -203,9 +245,10 @@ a glance.
 1. Incremental file watching and cached offsets.
 2. Pinned/archived branches and notification preferences.
 3. Reliable “needs permission/input” detection.
-4. Optional terminal deep links and Claude Code launch.
-5. Adapter interface for Codex and other subscription-backed local agents.
-6. Signed/notarized macOS release.
+4. Optional terminal deep links and coding-agent launch.
+5. Reliable Codex subagent hierarchy when local metadata exposes parent links.
+6. Additional subscription-backed local agent adapters.
+7. Signed/notarized macOS release.
 
 ## Open Questions
 

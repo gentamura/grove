@@ -1,7 +1,7 @@
 use crate::{
     models::{
-        ActivityKind, ClaudeSession, ClaudeSubagent, ConversationMessage, ConversationRole,
-        SessionActivity, SessionScan, SessionStatus,
+        ActivityKind, CodingAgent, CodingSession, CodingSubagent, ConversationMessage,
+        ConversationRole, SessionActivity, SessionScan, SessionStatus,
     },
     preferences::{Group, MapNodeOffset, Preferences},
     scanner,
@@ -58,6 +58,13 @@ enum StatusFilter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderFilter {
+    All,
+    ClaudeCode,
+    Codex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
     Detail,
     Map,
@@ -66,14 +73,14 @@ enum ViewMode {
 #[derive(Clone)]
 enum MapNode {
     Grove,
-    Session(ClaudeSession),
+    Session(CodingSession),
     AgentCluster {
         session_id: String,
-        subagents: Vec<ClaudeSubagent>,
+        subagents: Vec<CodingSubagent>,
     },
     Subagent {
         session_id: String,
-        subagent: ClaudeSubagent,
+        subagent: CodingSubagent,
     },
 }
 
@@ -149,6 +156,7 @@ pub struct Grove {
     selected_id: Option<String>,
     preferences: Preferences,
     filter: StatusFilter,
+    provider_filter: ProviderFilter,
     view_mode: ViewMode,
     query: String,
     search_input: Entity<TextInput>,
@@ -179,7 +187,7 @@ pub struct Grove {
 
 impl Grove {
     pub fn new(scan: SessionScan, cx: &mut Context<Self>) -> Self {
-        let selected_id = scan.sessions.first().map(|session| session.id.clone());
+        let selected_id = scan.sessions.first().map(CodingSession::key);
         let search_input = cx.new(|cx| TextInput::new(cx, "Find sessions"));
         let group_input = cx.new(|cx| TextInput::new(cx, "Group name"));
         let map_focus = cx.focus_handle();
@@ -214,6 +222,7 @@ impl Grove {
             selected_id,
             preferences: Preferences::load(),
             filter: StatusFilter::All,
+            provider_filter: ProviderFilter::All,
             view_mode: ViewMode::Detail,
             query: String::new(),
             search_input,
@@ -249,11 +258,11 @@ impl Grove {
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_secs(5)).await;
-                let root = claude_root();
+                let roots = session_roots();
                 let executor = cx.background_executor().clone();
                 let result = executor
                     .spawn(async move {
-                        scanner::scan_claude_sessions_at(&root, SystemTime::now())
+                        scanner::scan_sessions_at(&roots, SystemTime::now())
                             .map_err(|error| error.to_string())
                     })
                     .await;
@@ -278,11 +287,11 @@ impl Grove {
         self.scanning = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let root = claude_root();
+            let roots = session_roots();
             let executor = cx.background_executor().clone();
             let result = executor
                 .spawn(async move {
-                    scanner::scan_claude_sessions_at(&root, SystemTime::now())
+                    scanner::scan_sessions_at(&roots, SystemTime::now())
                         .map_err(|error| error.to_string())
                 })
                 .await;
@@ -295,9 +304,16 @@ impl Grove {
         .detach();
     }
 
-    fn open_messages(&mut self, session_id: String, title: String, cx: &mut Context<Self>) {
+    fn open_messages(
+        &mut self,
+        session_id: String,
+        provider: CodingAgent,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        let session_key = provider.session_key(&session_id);
         self.messages_open = true;
-        self.messages_session_id = Some(session_id.clone());
+        self.messages_session_id = Some(session_key.clone());
         self.messages_title = title;
         self.messages.clear();
         self.messages_error = None;
@@ -305,17 +321,17 @@ impl Grove {
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let root = claude_root();
+            let roots = session_roots();
             let requested_session_id = session_id.clone();
             let executor = cx.background_executor().clone();
             let result = executor
                 .spawn(async move {
-                    scanner::load_session_messages_at(&root, &requested_session_id)
+                    scanner::load_session_messages_for(&roots, provider, &requested_session_id)
                         .map_err(|error| error.to_string())
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.messages_session_id.as_deref() != Some(session_id.as_str()) {
+                if this.messages_session_id.as_deref() != Some(session_key.as_str()) {
                     return;
                 }
                 this.messages_loading = false;
@@ -378,9 +394,9 @@ impl Grove {
                 if self
                     .selected_id
                     .as_ref()
-                    .is_none_or(|id| !scan.sessions.iter().any(|session| &session.id == id))
+                    .is_none_or(|id| !scan.sessions.iter().any(|session| session.key() == *id))
                 {
-                    self.selected_id = scan.sessions.first().map(|session| session.id.clone());
+                    self.selected_id = scan.sessions.first().map(CodingSession::key);
                 }
                 self.scan = scan;
                 self.scan_error = None;
@@ -439,19 +455,35 @@ impl Grove {
         (!warnings.is_empty()).then(|| warnings.join("  ·  "))
     }
 
-    fn selected(&self) -> Option<ClaudeSession> {
+    fn selected(&self) -> Option<CodingSession> {
         self.selected_id
             .as_ref()
-            .and_then(|id| self.scan.sessions.iter().find(|session| &session.id == id))
+            .and_then(|id| {
+                self.scan
+                    .sessions
+                    .iter()
+                    .find(|session| session.key() == *id)
+            })
             .cloned()
-            .or_else(|| self.scan.sessions.first().cloned())
+            .or_else(|| self.filtered_sessions().first().cloned())
     }
 
-    fn visible_sessions(&self) -> Vec<ClaudeSession> {
+    fn filtered_sessions(&self) -> Vec<CodingSession> {
+        self.scan
+            .sessions
+            .iter()
+            .filter(|session| session_matches_provider_filter(session, self.provider_filter))
+            .filter(|session| session_matches_status_filter(session, self.filter))
+            .cloned()
+            .collect()
+    }
+
+    fn visible_sessions(&self) -> Vec<CodingSession> {
         let query = self.query.trim().to_lowercase();
         self.scan
             .sessions
             .iter()
+            .filter(|session| session_matches_provider_filter(session, self.provider_filter))
             .filter(|session| session_matches_status_filter(session, self.filter))
             .filter(|session| {
                 query.is_empty()
@@ -469,10 +501,11 @@ impl Grove {
             .collect()
     }
 
-    fn status_filtered_sessions(&self) -> Vec<ClaudeSession> {
+    fn status_filtered_sessions(&self) -> Vec<CodingSession> {
         self.scan
             .sessions
             .iter()
+            .filter(|session| session_matches_provider_filter(session, self.provider_filter))
             .filter(|session| session_matches_status_filter(session, self.filter))
             .cloned()
             .collect()
@@ -482,6 +515,7 @@ impl Grove {
         self.scan
             .sessions
             .iter()
+            .filter(|session| session_matches_provider_filter(session, self.provider_filter))
             .filter(|session| session.status == status)
             .count()
     }
@@ -494,7 +528,7 @@ impl Grove {
         } else if !self.scan.warnings.is_empty() {
             "Partial scan"
         } else {
-            "Watching ~/.claude/projects"
+            "Watching local sessions"
         };
         let has_error = self.scan_error.is_some() || self.preferences_error.is_some();
         let has_warning = !self.scan.warnings.is_empty();
@@ -512,7 +546,7 @@ impl Grove {
             .child(div().w(px(80.)).flex_none())
             .child(
                 div()
-                    .w(px(220.))
+                    .w(px(190.))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -542,12 +576,30 @@ impl Grove {
                         div()
                             .text_size(px(8.))
                             .text_color(rgb(FAINT))
-                            .child("GPUI / CLAUDE"),
+                            .child("LOCAL AGENTS"),
                     ),
             )
             .child(div().flex_1())
             .child(self.render_view_mode_button("Tree", ViewMode::Detail, cx))
             .child(self.render_view_mode_button("Map", ViewMode::Map, cx))
+            .child(
+                div()
+                    .ml(px(9.))
+                    .p(px(2.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .bg(rgb(PANEL))
+                    .child(self.render_provider_filter_button("All", ProviderFilter::All, cx))
+                    .child(self.render_provider_filter_button(
+                        "Claude",
+                        ProviderFilter::ClaudeCode,
+                        cx,
+                    ))
+                    .child(self.render_provider_filter_button("Codex", ProviderFilter::Codex, cx)),
+            )
             .child(
                 div()
                     .ml(px(12.))
@@ -941,9 +993,9 @@ impl Grove {
                 if this.selected_id.as_ref().is_none_or(|selected_id| {
                     !visible_sessions
                         .iter()
-                        .any(|session| &session.id == selected_id)
+                        .any(|session| session.key() == *selected_id)
                 }) {
-                    this.selected_id = visible_sessions.first().map(|session| session.id.clone());
+                    this.selected_id = visible_sessions.first().map(CodingSession::key);
                     this.selected_agent_id = None;
                     this.map_inspector_open = false;
                 }
@@ -993,6 +1045,54 @@ impl Grove {
             .child(label)
     }
 
+    fn render_provider_filter_button(
+        &self,
+        label: &'static str,
+        filter: ProviderFilter,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.provider_filter == filter;
+        div()
+            .id(SharedString::from(format!("provider-{label}")))
+            .h(px(23.))
+            .px(px(7.))
+            .flex()
+            .items_center()
+            .rounded(px(4.))
+            .bg(if selected {
+                rgb(PANEL_RAISED)
+            } else {
+                rgba(0x00000000)
+            })
+            .text_size(px(8.))
+            .font_weight(if selected {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(if selected { rgb(GREEN) } else { rgb(FAINT) })
+            .cursor_pointer()
+            .hover(|style| style.text_color(rgb(TEXT)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.provider_filter = filter;
+                let visible_sessions = this.status_filtered_sessions();
+                if this.selected_id.as_ref().is_none_or(|selected_id| {
+                    !visible_sessions
+                        .iter()
+                        .any(|session| session.key() == *selected_id)
+                }) {
+                    this.selected_id = visible_sessions.first().map(CodingSession::key);
+                    this.selected_agent_id = None;
+                    this.dismiss_map_overlays();
+                }
+                if this.view_mode == ViewMode::Map {
+                    this.center_map(window);
+                }
+                cx.notify();
+            }))
+            .child(label)
+    }
+
     fn render_filter(
         &self,
         label: &'static str,
@@ -1027,10 +1127,10 @@ impl Grove {
 
     fn render_sidebar(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         let visible = self.visible_sessions();
-        let mut by_group: HashMap<String, Vec<ClaudeSession>> = HashMap::new();
+        let mut by_group: HashMap<String, Vec<CodingSession>> = HashMap::new();
         let mut ungrouped = Vec::new();
         for session in visible {
-            if let Some(group_id) = self.preferences.assignments.get(&session.id)
+            if let Some(group_id) = self.preferences.assignments.get(&session.key())
                 && self
                     .preferences
                     .groups
@@ -1045,7 +1145,12 @@ impl Grove {
 
         let groups = self.preferences.groups.clone();
         let selected_id = self.selected_id.clone();
-        let session_count = self.scan.sessions.len();
+        let session_count = self
+            .scan
+            .sessions
+            .iter()
+            .filter(|session| session_matches_provider_filter(session, self.provider_filter))
+            .count();
         let active = self.status_count(SessionStatus::Active);
         let waiting = self.status_count(SessionStatus::Waiting);
 
@@ -1228,7 +1333,7 @@ impl Grove {
     fn render_group(
         &self,
         group: Group,
-        sessions: Vec<ClaudeSession>,
+        sessions: Vec<CodingSession>,
         selected_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1352,14 +1457,15 @@ impl Grove {
 
     fn render_session_leaf(
         &self,
-        session: ClaudeSession,
+        session: CodingSession,
         selected_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selected = selected_id == Some(session.id.as_str());
-        let session_id = session.id.clone();
+        let session_key = session.key();
+        let selected = selected_id == Some(session_key.as_str());
+        let selected_session_key = session_key.clone();
         let drag = SessionDrag {
-            session_id: session.id.clone(),
+            session_id: session_key.clone(),
             title: session.title.clone(),
         };
         let status_color = status_color(session.status);
@@ -1380,7 +1486,7 @@ impl Grove {
         };
 
         div()
-            .id(SharedString::from(format!("session-{}", session.id)))
+            .id(SharedString::from(format!("session-{session_key}")))
             .min_h(px(46.))
             .w_full()
             .px(px(8.))
@@ -1397,7 +1503,7 @@ impl Grove {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(0x17201a)))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.selected_id = Some(session_id.clone());
+                this.selected_id = Some(selected_session_key.clone());
                 this.copied_session = None;
                 cx.notify();
             }))
@@ -1810,13 +1916,14 @@ impl Grove {
                 )
                 .into_any_element(),
             MapNode::Session(session) => {
-                let selected = self.selected_id.as_deref() == Some(session.id.as_str())
+                let session_key = session.key();
+                let selected = self.selected_id.as_deref() == Some(session_key.as_str())
                     && self.selected_agent_id.is_none();
-                let session_id = session.id.clone();
+                let selected_session_key = session_key.clone();
                 let map_node_id = node_id.clone();
                 let color = status_color(session.status);
                 let subagent_count = session.subagents.len();
-                base.id(SharedString::from(format!("map-session-{}", session.id)))
+                base.id(SharedString::from(format!("map-session-{session_key}")))
                     .p(map_px(12., zoom))
                     .rounded(map_px(10., zoom))
                     .border_1()
@@ -1835,7 +1942,7 @@ impl Grove {
                             return;
                         }
                         this.clear_messages();
-                        this.selected_id = Some(session_id.clone());
+                        this.selected_id = Some(selected_session_key.clone());
                         this.selected_agent_id = None;
                         this.map_inspector_open = true;
                         cx.notify();
@@ -1851,7 +1958,7 @@ impl Grove {
                                     .text_size(map_px(8., zoom))
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(color)
-                                    .child("CLAUDE CODE"),
+                                    .child(session.provider.display_name().to_uppercase()),
                             )
                             .child(div().flex_1())
                             .child(
@@ -2035,7 +2142,7 @@ impl Grove {
                             .children(groups.into_iter().map(|(agent_type, agents)| {
                                 let rows = agents
                                     .chunks(columns)
-                                    .map(<[ClaudeSubagent]>::to_vec)
+                                    .map(<[CodingSubagent]>::to_vec)
                                     .collect::<Vec<_>>();
                                 div()
                                     .mb(map_px(11., zoom))
@@ -2163,7 +2270,7 @@ impl Grove {
     fn render_map_tray_agent(
         &self,
         session_id: String,
-        agent: ClaudeSubagent,
+        agent: CodingSubagent,
         zoom: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -2320,8 +2427,9 @@ impl Grove {
                 )
                 .into_any_element()
         } else {
-            let session_id = session.id.clone();
+            let session_id = session.key();
             let session_id_for_messages = session.id.clone();
+            let provider_for_messages = session.provider;
             let session_title_for_messages = session.title.clone();
             let status_color = status_color(session.status);
             let branch = session
@@ -2360,6 +2468,10 @@ impl Grove {
                         .flex_col()
                         .gap(px(9.))
                         .child(metadata_row("Project", session.project_name.clone()))
+                        .child(metadata_row(
+                            "Agent",
+                            session.provider.display_name().into(),
+                        ))
                         .child(metadata_row("Branch", branch))
                         .child(metadata_action_row(
                             format!("map-messages-{}", session.id),
@@ -2368,6 +2480,7 @@ impl Grove {
                             cx.listener(move |this, _, _, cx| {
                                 this.open_messages(
                                     session_id_for_messages.clone(),
+                                    provider_for_messages,
                                     session_title_for_messages.clone(),
                                     cx,
                                 );
@@ -2473,7 +2586,7 @@ impl Grove {
     fn render_map_inspector_agent(
         &self,
         session_id: String,
-        agent: ClaudeSubagent,
+        agent: CodingSubagent,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let selected = self.selected_agent_id.as_deref() == Some(agent.id.as_str());
@@ -2536,65 +2649,63 @@ impl Grove {
     }
 
     fn render_messages_drawer(&self, cx: &mut Context<Self>) -> Div {
-        let session_event_count = self
-            .messages_session_id
-            .as_ref()
-            .and_then(|session_id| {
-                self.scan
-                    .sessions
-                    .iter()
-                    .find(|session| &session.id == session_id)
-            })
-            .map_or(0, |session| session.message_count);
-        let body = if self.messages_loading {
-            div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(11.))
-                .text_color(rgb(MUTED))
-                .child("Loading complete history…")
-                .into_any_element()
-        } else if let Some(error) = self.messages_error.as_ref() {
-            div()
-                .m(px(18.))
-                .p(px(14.))
-                .rounded(px(7.))
-                .border_1()
-                .border_color(rgba(0xdd7b7255))
-                .bg(rgba(0x3b1d1a88))
-                .text_size(px(10.))
-                .line_height(px(15.))
-                .text_color(rgb(DANGER))
-                .whitespace_normal()
-                .child(error.clone())
-                .into_any_element()
-        } else if self.messages.is_empty() {
-            div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(11.))
-                .text_color(rgb(MUTED))
-                .child("No readable user or assistant messages.")
-                .into_any_element()
-        } else {
-            div()
-                .id("messages-history-scroll")
-                .flex_1()
-                .min_h(px(0.))
-                .overflow_y_scroll()
-                .p(px(18.))
-                .children(
-                    self.messages
-                        .iter()
-                        .cloned()
-                        .map(render_conversation_message),
-                )
-                .into_any_element()
-        };
+        let messages_session = self.messages_session_id.as_ref().and_then(|session_id| {
+            self.scan
+                .sessions
+                .iter()
+                .find(|session| session.key() == *session_id)
+        });
+        let session_event_count = messages_session.map_or(0, |session| session.message_count);
+        let assistant_label = messages_session
+            .map(|session| session.provider.display_name().to_uppercase())
+            .unwrap_or_else(|| "AGENT".into());
+        let body =
+            if self.messages_loading {
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child("Loading complete history…")
+                    .into_any_element()
+            } else if let Some(error) = self.messages_error.as_ref() {
+                div()
+                    .m(px(18.))
+                    .p(px(14.))
+                    .rounded(px(7.))
+                    .border_1()
+                    .border_color(rgba(0xdd7b7255))
+                    .bg(rgba(0x3b1d1a88))
+                    .text_size(px(10.))
+                    .line_height(px(15.))
+                    .text_color(rgb(DANGER))
+                    .whitespace_normal()
+                    .child(error.clone())
+                    .into_any_element()
+            } else if self.messages.is_empty() {
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child("No readable user or assistant messages.")
+                    .into_any_element()
+            } else {
+                div()
+                    .id("messages-history-scroll")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .p(px(18.))
+                    .children(self.messages.iter().cloned().map(|message| {
+                        render_conversation_message(message, assistant_label.clone())
+                    }))
+                    .into_any_element()
+            };
 
         div()
             .absolute()
@@ -2690,7 +2801,7 @@ impl Grove {
                     div()
                         .mt(px(7.))
                         .text_size(px(11.))
-                        .child("Start Claude Code in another terminal."),
+                        .child("Start Claude Code or Codex in another terminal."),
                 );
         };
 
@@ -2770,15 +2881,18 @@ impl Grove {
             )
     }
 
-    fn render_activity(&self, session: &ClaudeSession) -> impl IntoElement {
+    fn render_activity(&self, session: &CodingSession) -> impl IntoElement {
         let status_color = status_color(session.status);
         let state_description = match session.status {
             SessionStatus::Active => format!(
                 "{} activity was written recently.",
-                session.last_tool.as_deref().unwrap_or("Claude")
+                session
+                    .last_tool
+                    .as_deref()
+                    .unwrap_or(session.provider.display_name())
             ),
             SessionStatus::Waiting => {
-                "The last Claude turn finished and may need your next prompt.".into()
+                "The last turn finished and may need your next prompt.".into()
             }
             SessionStatus::Idle => "No recent log activity was detected.".into(),
         };
@@ -2885,16 +2999,18 @@ impl Grove {
 
     fn render_inspector(
         &self,
-        session: &ClaudeSession,
+        session: &CodingSession,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let assigned = self.preferences.assignments.get(&session.id).cloned();
-        let session_id_for_ungroup = session.id.clone();
+        let session_key = session.key();
+        let assigned = self.preferences.assignments.get(&session_key).cloned();
+        let session_id_for_ungroup = session_key.clone();
         let session_id_for_copy = session.id.clone();
         let session_id_for_messages = session.id.clone();
+        let provider_for_messages = session.provider;
         let session_title_for_messages = session.title.clone();
         let copied = self.copied_session.as_deref() == Some(session.id.as_str());
-        let command = format!("claude --resume {}", session.id);
+        let command = session.provider.resume_command(&session.id);
         let groups = self.preferences.groups.clone();
 
         div()
@@ -2938,7 +3054,7 @@ impl Grove {
                                 let selected = assigned.as_deref() == Some(group.id.as_str());
                                 let chip_id = group.id.clone();
                                 let group_id = group.id.clone();
-                                let session_id = session.id.clone();
+                                let session_id = session_key.clone();
                                 branch_chip(
                                     chip_id,
                                     group.name,
@@ -2964,6 +3080,10 @@ impl Grove {
                             .flex_col()
                             .gap(px(11.))
                             .child(metadata_row("Status", status_label(session.status).into()))
+                            .child(metadata_row(
+                                "Agent",
+                                session.provider.display_name().into(),
+                            ))
                             .child(metadata_action_row(
                                 format!("tree-messages-{}", session.id),
                                 "Messages",
@@ -2971,6 +3091,7 @@ impl Grove {
                                 cx.listener(move |this, _, _, cx| {
                                     this.open_messages(
                                         session_id_for_messages.clone(),
+                                        provider_for_messages,
                                         session_title_for_messages.clone(),
                                         cx,
                                     );
@@ -3006,7 +3127,10 @@ impl Grove {
                             .text_size(px(9.))
                             .line_height(px(14.))
                             .text_color(rgb(MUTED))
-                            .child("Continue from any terminal with Claude Code."),
+                            .child(format!(
+                                "Continue from any terminal with {}.",
+                                session.provider.display_name()
+                            )),
                     )
                     .child(
                         div()
@@ -3065,7 +3189,7 @@ impl Grove {
                     .text_color(rgb(FAINT))
                     .child(div().flex_none().child("◷"))
                     .child(div().min_w(px(0.)).flex_1().whitespace_normal().child(
-                        "Read-only local viewer. Status is inferred from Claude Code log events.",
+                        "Read-only local viewer. Status is inferred from local agent log events.",
                     )),
             )
     }
@@ -3122,12 +3246,12 @@ impl gpui::Render for Grove {
     }
 }
 
-fn build_mind_map_layout(sessions: &[ClaudeSession]) -> MindMapLayout {
+fn build_mind_map_layout(sessions: &[CodingSession]) -> MindMapLayout {
     build_mind_map_layout_with_expanded(sessions, &HashSet::new())
 }
 
 fn build_mind_map_layout_with_expanded(
-    sessions: &[ClaudeSession],
+    sessions: &[CodingSession],
     expanded_agent_clusters: &HashSet<String>,
 ) -> MindMapLayout {
     const ROOT_WIDTH: f32 = 190.;
@@ -3153,10 +3277,11 @@ fn build_mind_map_layout_with_expanded(
     let mut slots = Vec::new();
 
     for (index, session) in sessions.iter().cloned().enumerate() {
+        let session_key = session.key();
         let block_height = if session.subagents.is_empty() {
             132.
         } else if session.subagents.len() > MAP_AGENT_COMPACT_THRESHOLD {
-            if expanded_agent_clusters.contains(&session.id) {
+            if expanded_agent_clusters.contains(&session_key) {
                 expanded_agent_cluster_size(&session.subagents).1 + 40.
             } else {
                 166.
@@ -3196,7 +3321,8 @@ fn build_mind_map_layout_with_expanded(
     let mut edges = Vec::new();
 
     for (session, place_left, top, block_height) in slots {
-        let session_node_id = format!("session:{}", session.id);
+        let session_key = session.key();
+        let session_node_id = format!("session:{session_key}");
         let session_x = if place_left {
             center_x - 280. - SESSION_WIDTH
         } else {
@@ -3228,8 +3354,9 @@ fn build_mind_map_layout_with_expanded(
         });
 
         if session.subagents.len() > MAP_AGENT_COMPACT_THRESHOLD {
-            let cluster_node_id = format!("cluster:{}", session.id);
-            let (cluster_width, cluster_height) = if expanded_agent_clusters.contains(&session.id) {
+            let cluster_node_id = format!("cluster:{session_key}");
+            let (cluster_width, cluster_height) = if expanded_agent_clusters.contains(&session_key)
+            {
                 expanded_agent_cluster_size(&session.subagents)
             } else {
                 (MAP_AGENT_CLUSTER_WIDTH, MAP_AGENT_CLUSTER_HEIGHT)
@@ -3257,7 +3384,7 @@ fn build_mind_map_layout_with_expanded(
             nodes.push(PositionedMapNode {
                 id: cluster_node_id,
                 node: MapNode::AgentCluster {
-                    session_id: session.id.clone(),
+                    session_id: session_key.clone(),
                     subagents: session.subagents.clone(),
                 },
                 x: cluster_x,
@@ -3270,7 +3397,7 @@ fn build_mind_map_layout_with_expanded(
 
         let mut agent_positions: HashMap<String, (f32, f32, f32, f32)> = HashMap::new();
         for (agent_index, subagent) in session.subagents.iter().cloned().enumerate() {
-            let agent_node_id = format!("agent:{}:{}", session.id, subagent.id);
+            let agent_node_id = format!("agent:{session_key}:{}", subagent.id);
             let depth = subagent.spawn_depth.max(1) as f32;
             let agent_x = if place_left {
                 session_x - 130. - AGENT_WIDTH - (depth - 1.) * 320.
@@ -3288,7 +3415,7 @@ fn build_mind_map_layout_with_expanded(
                 .parent_agent_id
                 .as_ref()
                 .filter(|parent_id| agent_positions.contains_key(*parent_id))
-                .map(|parent_id| format!("agent:{}:{parent_id}", session.id))
+                .map(|parent_id| format!("agent:{session_key}:{parent_id}"))
                 .unwrap_or_else(|| session_node_id.clone());
             let (parent_edge_x, agent_edge_x) = if place_left {
                 (parent.0, agent_x + AGENT_WIDTH)
@@ -3311,7 +3438,7 @@ fn build_mind_map_layout_with_expanded(
             nodes.push(PositionedMapNode {
                 id: agent_node_id,
                 node: MapNode::Subagent {
-                    session_id: session.id.clone(),
+                    session_id: session_key.clone(),
                     subagent,
                 },
                 x: agent_x,
@@ -3383,14 +3510,14 @@ fn add_map_perimeter_padding(layout: &mut MindMapLayout) {
 
 #[cfg(test)]
 fn build_mind_map_layout_with_offsets(
-    sessions: &[ClaudeSession],
+    sessions: &[CodingSession],
     offsets: &HashMap<String, MapNodeOffset>,
 ) -> MindMapLayout {
     build_mind_map_layout_with_state(sessions, offsets, &HashSet::new())
 }
 
 fn build_mind_map_layout_with_state(
-    sessions: &[ClaudeSession],
+    sessions: &[CodingSession],
     offsets: &HashMap<String, MapNodeOffset>,
     expanded_agent_clusters: &HashSet<String>,
 ) -> MindMapLayout {
@@ -3541,7 +3668,7 @@ fn map_px(value: f32, zoom: f32) -> gpui::Pixels {
     px(value * zoom)
 }
 
-fn subagent_type_summary(subagents: &[ClaudeSubagent]) -> String {
+fn subagent_type_summary(subagents: &[CodingSubagent]) -> String {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for subagent in subagents {
         *counts.entry(subagent.agent_type.as_str()).or_default() += 1;
@@ -3558,8 +3685,8 @@ fn subagent_type_summary(subagents: &[ClaudeSubagent]) -> String {
         .join("  ·  ")
 }
 
-fn grouped_subagents(subagents: &[ClaudeSubagent]) -> Vec<(String, Vec<ClaudeSubagent>)> {
-    let mut groups: HashMap<String, Vec<ClaudeSubagent>> = HashMap::new();
+fn grouped_subagents(subagents: &[CodingSubagent]) -> Vec<(String, Vec<CodingSubagent>)> {
+    let mut groups: HashMap<String, Vec<CodingSubagent>> = HashMap::new();
     for subagent in subagents {
         groups
             .entry(subagent.agent_type.clone())
@@ -3586,7 +3713,7 @@ fn agent_tray_column_count(agent_count: usize) -> usize {
     }
 }
 
-fn expanded_agent_cluster_size(subagents: &[ClaudeSubagent]) -> (f32, f32) {
+fn expanded_agent_cluster_size(subagents: &[CodingSubagent]) -> (f32, f32) {
     const GROUP_HEADER_HEIGHT: f32 = 16.;
     const GROUP_HEADER_MARGIN: f32 = 6.;
     const GROUP_BOTTOM_MARGIN: f32 = 11.;
@@ -3614,7 +3741,7 @@ fn expanded_agent_cluster_size(subagents: &[ClaudeSubagent]) -> (f32, f32) {
     (width.max(MAP_AGENT_CLUSTER_WIDTH), height)
 }
 
-fn subagent_status_summary(subagents: &[ClaudeSubagent]) -> String {
+fn subagent_status_summary(subagents: &[CodingSubagent]) -> String {
     let active = subagents
         .iter()
         .filter(|agent| agent.status == SessionStatus::Active)
@@ -3774,7 +3901,7 @@ fn metadata_action_row(
         )
 }
 
-fn render_conversation_message(message: ConversationMessage) -> Div {
+fn render_conversation_message(message: ConversationMessage, assistant_label: String) -> Div {
     let is_user = message.role == ConversationRole::User;
     let timestamp = message
         .timestamp
@@ -3806,7 +3933,11 @@ fn render_conversation_message(message: ConversationMessage) -> Div {
                                 .text_size(px(8.))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(if is_user { rgb(BLUE) } else { rgb(GREEN) })
-                                .child(if is_user { "YOU" } else { "CLAUDE" }),
+                                .child(if is_user {
+                                    "YOU".into()
+                                } else {
+                                    assistant_label
+                                }),
                         )
                         .child(div().flex_1())
                         .child(
@@ -3844,12 +3975,20 @@ fn status_label(status: SessionStatus) -> &'static str {
     }
 }
 
-fn session_matches_status_filter(session: &ClaudeSession, filter: StatusFilter) -> bool {
+fn session_matches_status_filter(session: &CodingSession, filter: StatusFilter) -> bool {
     match filter {
         StatusFilter::All => true,
         StatusFilter::Active => session.status == SessionStatus::Active,
         StatusFilter::Waiting => session.status == SessionStatus::Waiting,
         StatusFilter::Idle => session.status == SessionStatus::Idle,
+    }
+}
+
+fn session_matches_provider_filter(session: &CodingSession, filter: ProviderFilter) -> bool {
+    match filter {
+        ProviderFilter::All => true,
+        ProviderFilter::ClaudeCode => session.provider == CodingAgent::ClaudeCode,
+        ProviderFilter::Codex => session.provider == CodingAgent::Codex,
     }
 }
 
@@ -3906,6 +4045,19 @@ pub fn claude_root() -> PathBuf {
         .join("projects")
 }
 
+pub fn codex_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
+}
+
+pub fn session_roots() -> scanner::SessionRoots {
+    scanner::SessionRoots {
+        claude: claude_root(),
+        codex: codex_root(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3923,8 +4075,9 @@ mod tests {
     fn filter_matches_project_metadata() {
         let now = Utc::now().to_rfc3339();
         let scan = SessionScan {
-            sessions: vec![ClaudeSession {
+            sessions: vec![CodingSession {
                 id: "one".into(),
+                provider: CodingAgent::ClaudeCode,
                 title: "Investigate tests".into(),
                 project_name: "looper".into(),
                 cwd: "/Users/mai/looper".into(),
@@ -3940,7 +4093,7 @@ mod tests {
                 subagents: vec![],
             }],
             scanned_at: Utc::now().to_rfc3339(),
-            source_root: "/tmp".into(),
+            source_roots: vec!["/tmp".into()],
             skipped_files: 0,
             warnings: vec![],
         };
@@ -3966,8 +4119,9 @@ mod tests {
 
     #[test]
     fn status_filters_include_only_matching_sessions() {
-        let session = |id: &str, status: SessionStatus| ClaudeSession {
+        let session = |id: &str, status: SessionStatus| CodingSession {
             id: id.into(),
+            provider: CodingAgent::ClaudeCode,
             title: id.into(),
             project_name: "grove".into(),
             cwd: "/Users/mai/grove".into(),
@@ -4005,6 +4159,48 @@ mod tests {
     }
 
     #[test]
+    fn provider_filters_keep_claude_and_codex_sessions_separate() {
+        let session = |id: &str, provider: CodingAgent| CodingSession {
+            id: id.into(),
+            provider,
+            title: id.into(),
+            project_name: "grove".into(),
+            cwd: "/Users/mai/grove".into(),
+            git_branch: None,
+            slug: None,
+            status: SessionStatus::Idle,
+            updated_at: Utc::now().to_rfc3339(),
+            started_at: None,
+            message_count: 1,
+            last_prompt: None,
+            last_tool: None,
+            activities: vec![],
+            subagents: vec![],
+        };
+        let sessions = [
+            session("claude-session", CodingAgent::ClaudeCode),
+            session("codex-session", CodingAgent::Codex),
+        ];
+        let matching_ids = |filter| {
+            sessions
+                .iter()
+                .filter(|session| session_matches_provider_filter(session, filter))
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            matching_ids(ProviderFilter::All),
+            vec!["claude-session", "codex-session"]
+        );
+        assert_eq!(
+            matching_ids(ProviderFilter::ClaudeCode),
+            vec!["claude-session"]
+        );
+        assert_eq!(matching_ids(ProviderFilter::Codex), vec!["codex-session"]);
+    }
+
+    #[test]
     fn duplicate_group_labels_can_have_unique_chip_ids() {
         assert_ne!(
             branch_chip_element_id("release-train"),
@@ -4015,7 +4211,7 @@ mod tests {
     #[test]
     fn mind_map_places_sessions_and_nested_agents_around_grove() {
         let timestamp = Utc::now().to_rfc3339();
-        let subagent = |id: &str, parent: Option<&str>, depth: usize| ClaudeSubagent {
+        let subagent = |id: &str, parent: Option<&str>, depth: usize| CodingSubagent {
             id: id.into(),
             parent_agent_id: parent.map(str::to_owned),
             agent_type: "Explore".into(),
@@ -4026,8 +4222,9 @@ mod tests {
             last_tool: Some("Read".into()),
             spawn_depth: depth,
         };
-        let session = ClaudeSession {
+        let session = CodingSession {
             id: "session-map".into(),
+            provider: CodingAgent::ClaudeCode,
             title: "Build the map".into(),
             project_name: "grove".into(),
             cwd: "/Users/mai/grove".into(),
@@ -4092,8 +4289,9 @@ mod tests {
     #[test]
     fn map_node_offsets_move_nodes_and_keep_edges_attached() {
         let timestamp = Utc::now().to_rfc3339();
-        let session = ClaudeSession {
+        let session = CodingSession {
             id: "movable-session".into(),
+            provider: CodingAgent::ClaudeCode,
             title: "Move this node".into(),
             project_name: "grove".into(),
             cwd: "/Users/mai/grove".into(),
@@ -4196,7 +4394,7 @@ mod tests {
     fn large_agent_fans_collapse_into_one_cluster_node() {
         let timestamp = Utc::now().to_rfc3339();
         let subagents = (0..13)
-            .map(|index| ClaudeSubagent {
+            .map(|index| CodingSubagent {
                 id: format!("agent-{index}"),
                 parent_agent_id: None,
                 agent_type: if index < 9 { "fork" } else { "general-purpose" }.into(),
@@ -4208,8 +4406,9 @@ mod tests {
                 spawn_depth: 1,
             })
             .collect::<Vec<_>>();
-        let session = ClaudeSession {
+        let session = CodingSession {
             id: "clustered-session".into(),
+            provider: CodingAgent::ClaudeCode,
             title: "Many agents".into(),
             project_name: "grove".into(),
             cwd: "/Users/mai/grove".into(),
@@ -4245,7 +4444,7 @@ mod tests {
     fn expanded_agent_cluster_keeps_one_node_and_adds_group_content_below_toggle() {
         let timestamp = Utc::now().to_rfc3339();
         let subagents = (0..19)
-            .map(|index| ClaudeSubagent {
+            .map(|index| CodingSubagent {
                 id: format!("agent-{index}"),
                 parent_agent_id: None,
                 agent_type: if index < 16 {
@@ -4264,8 +4463,9 @@ mod tests {
                 spawn_depth: 1,
             })
             .collect::<Vec<_>>();
-        let session = ClaudeSession {
+        let session = CodingSession {
             id: "expanded-session".into(),
+            provider: CodingAgent::ClaudeCode,
             title: "Many grouped agents".into(),
             project_name: "grove".into(),
             cwd: "/Users/mai/grove".into(),
@@ -4315,7 +4515,7 @@ mod tests {
     #[test]
     fn very_large_inline_agent_groups_use_four_columns_and_show_all_rows() {
         let subagents = (0..81)
-            .map(|index| ClaudeSubagent {
+            .map(|index| CodingSubagent {
                 id: format!("agent-{index}"),
                 parent_agent_id: None,
                 agent_type: if index < 48 {

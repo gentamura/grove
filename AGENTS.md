@@ -5,14 +5,15 @@ Human contributors should find the same commands and constraints useful.
 
 ## Mission
 
-Grove is a native macOS, read-only viewer for Claude Code sessions stored under
-`~/.claude/projects`. It presents main sessions and nested subagents in a tree
-and a graphical map without launching Claude Code or modifying its data.
+Grove is a native macOS, read-only viewer for Claude Code and Codex sessions
+stored under their standard local data directories. It presents sessions and
+supported nested subagents in a tree and a graphical map without launching a
+coding agent or modifying its data.
 
 Preserve these product boundaries unless a task explicitly changes them:
 
-- Claude Code data is read-only.
-- Grove remains local-first and does not require an Anthropic API key.
+- Claude Code and Codex data is read-only.
+- Grove remains local-first and does not require Anthropic or OpenAI API keys.
 - Session state is inferred from log events and must be labeled as inferred.
 - The application and view layer are Rust and GPUI; do not introduce a webview
   frontend or revive the superseded Tauri architecture.
@@ -36,8 +37,8 @@ ADR-0001 is historical and superseded. Do not implement its Tauri/React design.
 
 - `src/main.rs`: application startup, macOS window lifecycle, and menus.
 - `src/app.rs`: Grove state and GPUI rendering/interactions.
-- `src/scanner.rs`: Claude Code JSONL discovery, parsing, status inference, and
-  transcript loading.
+- `src/scanner.rs`: provider-specific JSONL discovery, parsing, status
+  inference, and transcript loading.
 - `src/models.rs`: UI-independent session, subagent, activity, and message
   types.
 - `src/preferences.rs`: Grove-owned groups and map offsets, saved atomically.
@@ -68,28 +69,30 @@ For packaging, lifecycle, or release-build changes, also run:
   target/release/bundle/macos/Grove.app
 ```
 
-The real-data scanner smoke test is optional because it reads private local
-Claude Code history:
+The real-data scanner smoke tests are optional because they read private local
+coding-agent history:
 
 ```bash
 cargo test scans_installed_claude_sessions -- --ignored --nocapture
+cargo test scans_installed_codex_sessions -- --ignored --nocapture
 ```
 
-Do not make ordinary tests depend on `~/.claude`, the network, or the current
-user's preferences.
+Do not make ordinary tests depend on `~/.claude`, `~/.codex`, the network, or
+the current user's preferences.
 
 ## Engineering constraints
 
-### Claude Code data
+### Coding-agent data
 
-- Never write, rename, delete, or normalize files under `~/.claude`.
+- Never write, rename, delete, or normalize files under `~/.claude` or
+  `~/.codex`.
 - Treat observed JSONL shapes as unstable input, not a guaranteed API.
 - Ignore unknown fields and continue past malformed records where safe.
 - Preserve partial-scan warnings so users can distinguish full and partial
   results.
 - Keep transcript loading lazy; do not load every complete conversation during
   the five-second session scan.
-- Avoid exposing raw shell commands or Claude-injected internal metadata as
+- Avoid exposing raw shell commands or provider-injected internal metadata as
   session titles.
 
 ### State and persistence
@@ -119,8 +122,8 @@ user's preferences.
 - Keep `scanner`, `models`, and `preferences` free of GPUI imports.
 - Prefer small pure helper functions for layout, parsing, and classification so
   behavior can be unit tested.
-- Use tolerant parsing at the Claude boundary and strongly typed models inside
-  the application.
+- Use tolerant parsing at each provider boundary and strongly typed models
+  inside the application.
 - Do not add network access for functionality that can be derived locally.
 
 ### Licensing and distribution
