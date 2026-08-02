@@ -4,7 +4,7 @@ mod preferences;
 mod scanner;
 mod text_input;
 
-use app::{Grove, claude_root};
+use app::{Grove, session_roots};
 use gpui::{
     App, AppContext, Application, Bounds, Menu, MenuItem, SystemMenuType, TitlebarOptions,
     WindowBounds, WindowOptions, actions, px, size,
@@ -14,11 +14,15 @@ use std::time::SystemTime;
 actions!(grove, [Quit]);
 
 fn initial_scan() -> models::SessionScan {
-    scanner::scan_claude_sessions_at(&claude_root(), SystemTime::now()).unwrap_or_else(|error| {
+    let roots = session_roots();
+    scanner::scan_sessions_at(&roots, SystemTime::now()).unwrap_or_else(|error| {
         models::SessionScan {
             sessions: vec![],
             scanned_at: chrono::Utc::now().to_rfc3339(),
-            source_root: claude_root().to_string_lossy().into_owned(),
+            source_roots: vec![
+                roots.claude.to_string_lossy().into_owned(),
+                roots.codex.to_string_lossy().into_owned(),
+            ],
             skipped_files: 1,
             warnings: vec![error.to_string()],
         }

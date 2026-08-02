@@ -5,13 +5,15 @@ repository-wide guide; this file adds Claude Code-specific reminders.
 
 ## Project context
 
-Grove observes the local files written by Claude Code and visualizes sessions
-and subagents in a native Rust/GPUI macOS application. Grove does not currently
-launch Claude Code, send prompts, or own terminal processes.
+Grove observes the local files written by Claude Code and Codex and visualizes
+sessions and supported subagents in a native Rust/GPUI macOS application. Grove
+does not currently launch coding agents, send prompts, or own terminal
+processes.
 
 ## Non-negotiable rules
 
 - Never modify anything under `~/.claude`.
+- Never modify anything under `~/.codex`.
 - Never use real user transcripts as committed fixtures.
 - Treat Claude Code JSONL as an observed, evolving format. Parse defensively and
   retain partial-scan warnings.

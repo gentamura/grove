@@ -1,26 +1,28 @@
 <div align="center">
   <img src="assets/icon.svg" width="96" height="96" alt="Grove icon">
   <h1>Grove</h1>
-  <p><strong>A native macOS workspace for observing Claude Code sessions and subagents.</strong></p>
+  <p><strong>A native macOS workspace for observing local coding-agent sessions.</strong></p>
 </div>
 
-Grove reads the local session history produced by Claude Code and turns it into
-an inspectable tree and graphical agent map. It is designed for developers who
-run several Claude Code sessions in separate terminals and want one place to
-understand what is active, what is waiting, and how delegated agents relate to
-their parent sessions.
+Grove reads the local session history produced by Claude Code and Codex and
+turns it into an inspectable tree and graphical agent map. It is designed for
+developers who run several coding-agent sessions in separate terminals and
+want one place to understand what is active, what is waiting, and how delegated
+Claude Code agents relate to their parent sessions.
 
 The entire application, including the UI, is written in Rust with
 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), the
 GPU-accelerated UI framework used by Zed.
 
 > [!IMPORTANT]
-> Grove is currently an early macOS-only project. It observes Claude Code; it
-> does not launch sessions, send prompts, or replace the terminal.
+> Grove is currently an early macOS-only project. It observes Claude Code and
+> Codex; it does not launch sessions, send prompts, or replace the terminal.
 
 ## Highlights
 
 - Discovers Claude Code sessions under `~/.claude/projects`.
+- Discovers Codex sessions under `~/.codex/sessions` and
+  `~/.codex/archived_sessions`.
 - Refreshes local session state every five seconds.
 - Displays project, branch, title, recent activity, message count, and resume
   command.
@@ -30,6 +32,7 @@ GPU-accelerated UI framework used by Zed.
 - Compacts large subagent fans into expandable, grouped agent clusters.
 - Supports node dragging, persistent node positions, canvas panning, and zoom.
 - Filters the tree and map by status.
+- Switches the entire workspace between All, Claude Code, and Codex.
 - Opens complete readable user/assistant message history on demand.
 - Creates local groups without modifying Claude Code data.
 - Handles malformed or partially unreadable session data without failing the
@@ -41,24 +44,24 @@ GPU-accelerated UI framework used by Zed.
 Grove is a read-only observer:
 
 ```text
-~/.claude/projects/**/*.jsonl
-              │
-              ▼
-     tolerant Rust scanner
-              │
-              ▼
-  sessions + nested subagents
-              │
-        ┌─────┴─────┐
-        ▼           ▼
-   Tree view    Agent map
+~/.claude/projects/**/*.jsonl     ~/.codex/{sessions,archived_sessions}/**/*.jsonl
+                 │                                      │
+                 ▼                                      ▼
+        Claude Code adapter                       Codex adapter
+                 └──────────────────┬───────────────────┘
+                                    ▼
+                    sessions + supported subagents
+                                    │
+                              ┌─────┴─────┐
+                              ▼           ▼
+                         Tree view    Agent map
 ```
 
-Claude Code's local JSONL format is not treated as a stable public API. The
-scanner therefore parses records defensively, ignores unknown fields, reports
-partial failures, and keeps Claude-owned files read-only.
+The agents' local JSONL formats are not treated as stable public APIs. Provider
+adapters therefore parse records defensively, ignore unknown fields, report
+partial failures, and keep agent-owned files read-only.
 
-Session status is inferred rather than reported by Claude Code:
+Session status is inferred rather than reported by either coding agent:
 
 - **Working:** an unfinished turn has activity within the last 90 seconds.
 - **Waiting:** a finished turn has activity within the last 15 minutes.
@@ -69,7 +72,8 @@ Session status is inferred rather than reported by Claude Code:
 To use Grove:
 
 - macOS 13 or newer
-- Claude Code installed and used at least once, so local session history exists
+- Claude Code or Codex installed and used at least once, so local session
+  history exists
 
 To build Grove:
 
@@ -91,8 +95,8 @@ cd grove
 cargo run
 ```
 
-Grove automatically watches the Claude Code data directory for the current
-macOS user.
+Grove automatically watches the supported coding-agent data directories for
+the current macOS user.
 
 ## Controls
 
@@ -102,6 +106,7 @@ macOS user.
 |---|---|
 | Select a session | Show its activity, metadata, and resume command |
 | Search or select a status | Filter visible sessions |
+| Select All, Claude, or Codex | Filter both Tree and Map by coding agent |
 | Drag a session onto a group | Persist local group membership |
 | Select **Messages** | Open the complete readable conversation history |
 
@@ -128,10 +133,11 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-One ignored smoke test reads the current user's real Claude Code installation:
+Ignored smoke tests can read the current user's real local installations:
 
 ```bash
 cargo test scans_installed_claude_sessions -- --ignored --nocapture
+cargo test scans_installed_codex_sessions -- --ignored --nocapture
 ```
 
 The smoke test is intentionally ignored by default because it depends on local,
@@ -156,10 +162,11 @@ not implemented yet.
 
 Grove:
 
-- reads Claude Code session logs from `~/.claude/projects`;
-- never writes to Claude Code's files;
-- does not read Claude account credentials;
-- does not call the Anthropic API;
+- reads Claude Code session logs from `~/.claude/projects` and Codex rollout
+  logs from `~/.codex/sessions` and `~/.codex/archived_sessions`;
+- never writes to coding-agent files;
+- does not read Claude Code or Codex account credentials;
+- does not call the Anthropic or OpenAI APIs;
 - stores Grove-owned grouping and map preferences at
   `~/Library/Application Support/Grove/preferences.json`.
 
@@ -172,8 +179,8 @@ shares it.
 src/
 ├── main.rs          macOS application and window lifecycle
 ├── app.rs           GPUI state, tree view, map view, and interactions
-├── scanner.rs       tolerant Claude Code JSONL adapter
-├── models.rs        UI-independent session and agent models
+├── scanner.rs       tolerant Claude Code and Codex JSONL adapters
+├── models.rs        provider-aware, UI-independent session and agent models
 ├── preferences.rs   atomic local preference persistence
 └── text_input.rs    native GPUI text input and IME behavior
 
@@ -193,11 +200,13 @@ scripts/             local build and packaging scripts
 
 ## Current limitations
 
-- Grove cannot start, resume, or send messages to Claude Code.
+- Grove cannot start, resume, or send messages to Claude Code or Codex.
 - Status is based on log freshness, not process presence.
 - Scans currently revisit the local session tree instead of incrementally
   tailing changed files.
-- Only Claude Code's observed local format is supported.
+- Codex internal subagent rollouts are excluded until their local metadata
+  exposes a stable parent-session relationship.
+- Only the observed local formats of Claude Code and Codex are supported.
 - The macOS bundle is not signed for public distribution or notarized.
 - Third-party notices are not bundled yet; complete the
   [binary distribution checklist](docs/licensing.md#distributing-a-binary)
