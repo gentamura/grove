@@ -164,6 +164,19 @@ a glance.
   dismissal as an accidental click.
 - [x] The map header switches between All, Working, Waiting, and Idle; the
   layout, session count, and subagent count reflect only matching sessions.
+- [x] The map offers rolling last-activity filters for All time, 1 hour, 1 day,
+  1 week, and 1 month; these use `updated_at`, not session start time.
+- [x] The month preset is a rolling 30-day window, and every preset includes a
+  session exactly on its boundary.
+- [x] A custom Since field accepts `YYYY-MM-DD` and `YYYY-MM-DD HH:mm` in the
+  Mac's local timezone, with a date-only value interpreted as local midnight.
+- [x] Applying a custom Since value shows sessions updated at or after that
+  timestamp; invalid input keeps the previous filter and displays guidance.
+- [x] Provider, status, and last-activity filters combine with AND semantics;
+  the map layout, counts, selected detail, and Messages drawer reconcile to the
+  combined result.
+- [x] Future update timestamps count as recent, while unparseable timestamps
+  appear only under All time.
 - [x] If a status filter hides the inspected session, its detail panel closes
   and the first matching session becomes the current selection.
 
@@ -221,7 +234,7 @@ without running separate monitoring applications.
 | GPUI application shell | M | Desktop | — | macOS GPUI window compiles and launches |
 | Provider adapters | M | Native | — | Claude Code and Codex unit tests and real-data scans succeed |
 | Tree/session UI | L | GPUI view | View model | Responsive at 880×620 and 1280×820 |
-| Mind-map UI | L | GPUI view | Subagent hierarchy | Root, sessions, agents, and curved connections pan, scroll, and zoom as one canvas |
+| Mind-map UI | L | GPUI view | Subagent hierarchy | Root, sessions, agents, and curved connections pan, scroll, zoom, and filter by status and last activity as one canvas |
 | Group persistence | S | Rust state | Tree UI | Create/move/delete survive relaunch |
 | Refresh and error states | S | GPUI task/view | Adapter | Empty, loading, live, and error states render |
 | macOS bundle and icon | M | Distribution | All above | ad-hoc-signed `.app` builds and validates locally |
@@ -238,6 +251,7 @@ without running separate monitoring applications.
 | Prompt previews contain local project information | Medium | Keep all processing local, no network calls, truncate previews, add privacy controls later |
 | Text becomes difficult to read at extreme map scales | Low | Bound zoom to 50–160%, show the current percentage, and provide a one-click 100% reset |
 | Large sessions create unreadable edge fans | Medium | Collapse more than 12 children into one aggregate node; expand a multi-column inline group beneath that same node on demand |
+| Custom local times can be invalid or ambiguous around daylight-saving transitions | Low | Parse through the Mac's local timezone, retain the prior filter, and show an inline error when no single instant exists |
 | macOS signing/notarization is required for distribution | Medium | Keep local unsigned build for development; add signing in the release milestone |
 
 ## Next milestones

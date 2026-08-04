@@ -32,6 +32,7 @@ GPU-accelerated UI framework used by Zed.
 - Compacts large subagent fans into expandable, grouped agent clusters.
 - Supports node dragging, persistent node positions, canvas panning, and zoom.
 - Filters the tree and map by status.
+- Filters the map by rolling last activity or a custom local Since date/time.
 - Switches the entire workspace between All, Claude Code, and Codex.
 - Opens complete readable user/assistant message history on demand.
 - Creates local groups without modifying Claude Code data.
@@ -121,6 +122,8 @@ the current macOS user.
 | Hold `Space` and drag | Pan the canvas |
 | Hold `Command` and scroll | Zoom around the pointer |
 | Use `−`, `+`, or **Center** | Adjust or recenter the map |
+| Select **All time**, **1h**, **1d**, **1w**, or **1mo** | Filter by the session's latest recorded activity |
+| Enter a local **Since** date/time | Show sessions updated at or after `YYYY-MM-DD` or `YYYY-MM-DD HH:mm` |
 | Expand a compact agent cluster | Show every grouped subagent as a clickable mini leaf |
 
 ## Verify changes

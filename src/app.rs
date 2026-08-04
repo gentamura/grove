@@ -7,7 +7,7 @@ use crate::{
     scanner,
     text_input::{InputEvent, TextInput},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use gpui::{
     App, ClipboardItem, Context, CursorStyle, Div, Entity, FocusHandle, Focusable, FontWeight,
     Hsla, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -48,6 +48,9 @@ const MAP_AGENT_TRAY_WIDTH_BUFFER: f32 = 12.;
 const MAP_AGENT_TRAY_HEIGHT_BUFFER: f32 = 32.;
 const MAP_CANVAS_MIN_RADIUS_X: f32 = 1_000.;
 const MAP_CANVAS_MIN_RADIUS_Y: f32 = 640.;
+const MAP_HEADER_HEIGHT: f32 = 58.;
+const MAP_TIME_TOOLBAR_HEIGHT: f32 = 42.;
+const MAP_OVERLAY_TOP: f32 = MAP_HEADER_HEIGHT + MAP_TIME_TOOLBAR_HEIGHT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusFilter {
@@ -62,6 +65,16 @@ enum ProviderFilter {
     All,
     ClaudeCode,
     Codex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityTimeFilter {
+    All,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Custom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +170,10 @@ pub struct Grove {
     preferences: Preferences,
     filter: StatusFilter,
     provider_filter: ProviderFilter,
+    map_time_filter: ActivityTimeFilter,
+    map_custom_since: Option<DateTime<Utc>>,
+    map_time_input: Entity<TextInput>,
+    map_time_input_error: Option<String>,
     view_mode: ViewMode,
     query: String,
     search_input: Entity<TextInput>,
@@ -190,6 +207,7 @@ impl Grove {
         let selected_id = scan.sessions.first().map(CodingSession::key);
         let search_input = cx.new(|cx| TextInput::new(cx, "Find sessions"));
         let group_input = cx.new(|cx| TextInput::new(cx, "Group name"));
+        let map_time_input = cx.new(|cx| TextInput::new(cx, "YYYY-MM-DD HH:mm"));
         let map_focus = cx.focus_handle();
 
         cx.subscribe(&search_input, |this, input, event, cx| {
@@ -217,12 +235,30 @@ impl Grove {
         })
         .detach();
 
+        cx.subscribe(&map_time_input, |this, input, event, cx| match event {
+            InputEvent::Submitted => {
+                let value = input.read(cx).text();
+                this.apply_custom_time_filter(&value);
+                cx.notify();
+            }
+            InputEvent::Changed => {
+                this.map_time_input_error = None;
+                cx.notify();
+            }
+            InputEvent::Cancelled => {}
+        })
+        .detach();
+
         let this = Self {
             scan,
             selected_id,
             preferences: Preferences::load(),
             filter: StatusFilter::All,
             provider_filter: ProviderFilter::All,
+            map_time_filter: ActivityTimeFilter::All,
+            map_custom_since: None,
+            map_time_input,
+            map_time_input_error: None,
             view_mode: ViewMode::Detail,
             query: String::new(),
             search_input,
@@ -391,14 +427,16 @@ impl Grove {
     fn apply_scan_result(&mut self, result: Result<SessionScan, String>) {
         match result {
             Ok(scan) => {
-                if self
+                let selection_missing = self
                     .selected_id
                     .as_ref()
-                    .is_none_or(|id| !scan.sessions.iter().any(|session| session.key() == *id))
-                {
-                    self.selected_id = scan.sessions.first().map(CodingSession::key);
-                }
+                    .is_none_or(|id| !scan.sessions.iter().any(|session| session.key() == *id));
                 self.scan = scan;
+                if self.view_mode == ViewMode::Map {
+                    self.reconcile_map_selection();
+                } else if selection_missing {
+                    self.selected_id = self.scan.sessions.first().map(CodingSession::key);
+                }
                 self.scan_error = None;
             }
             Err(error) => self.scan_error = Some(error),
@@ -501,14 +539,49 @@ impl Grove {
             .collect()
     }
 
-    fn status_filtered_sessions(&self) -> Vec<CodingSession> {
+    fn map_filtered_sessions(&self) -> Vec<CodingSession> {
+        let now = Utc::now();
         self.scan
             .sessions
             .iter()
             .filter(|session| session_matches_provider_filter(session, self.provider_filter))
             .filter(|session| session_matches_status_filter(session, self.filter))
+            .filter(|session| {
+                session_matches_activity_time_filter(
+                    session,
+                    self.map_time_filter,
+                    now,
+                    self.map_custom_since.as_ref(),
+                )
+            })
             .cloned()
             .collect()
+    }
+
+    fn reconcile_map_selection(&mut self) {
+        let visible_sessions = self.map_filtered_sessions();
+        if self.selected_id.as_ref().is_none_or(|selected_id| {
+            !visible_sessions
+                .iter()
+                .any(|session| session.key() == *selected_id)
+        }) {
+            self.selected_id = visible_sessions.first().map(CodingSession::key);
+            self.selected_agent_id = None;
+            self.map_inspector_open = false;
+            self.clear_messages();
+        }
+    }
+
+    fn apply_custom_time_filter(&mut self, value: &str) {
+        match parse_custom_activity_cutoff(value) {
+            Ok(cutoff) => {
+                self.map_custom_since = Some(cutoff);
+                self.map_time_filter = ActivityTimeFilter::Custom;
+                self.map_time_input_error = None;
+                self.reconcile_map_selection();
+            }
+            Err(error) => self.map_time_input_error = Some(error),
+        }
     }
 
     fn status_count(&self, status: SessionStatus) -> usize {
@@ -649,7 +722,7 @@ impl Grove {
             offsets.insert(drag.node_id.clone(), drag.current_offset);
         }
         build_mind_map_layout_with_state(
-            &self.status_filtered_sessions(),
+            &self.map_filtered_sessions(),
             &offsets,
             &self.expanded_agent_clusters,
         )
@@ -989,21 +1062,157 @@ impl Grove {
             .hover(move |style| style.border_color(color).text_color(rgb(TEXT)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.filter = filter;
-                let visible_sessions = this.status_filtered_sessions();
-                if this.selected_id.as_ref().is_none_or(|selected_id| {
-                    !visible_sessions
-                        .iter()
-                        .any(|session| session.key() == *selected_id)
-                }) {
-                    this.selected_id = visible_sessions.first().map(CodingSession::key);
-                    this.selected_agent_id = None;
-                    this.map_inspector_open = false;
-                }
+                this.reconcile_map_selection();
                 this.center_map(window);
                 cx.notify();
             }))
             .child(div().size(px(6.)).rounded_full().bg(color))
             .child(label)
+    }
+
+    fn render_map_time_filter(
+        &self,
+        label: &'static str,
+        filter: ActivityTimeFilter,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.map_time_filter == filter;
+        div()
+            .id(SharedString::from(format!("map-time-filter-{label}")))
+            .h(px(24.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .rounded(px(5.))
+            .border_1()
+            .border_color(if selected { rgb(BLUE) } else { rgb(LINE) })
+            .bg(if selected {
+                rgba(0x7db8c91c)
+            } else {
+                rgba(0x00000000)
+            })
+            .text_size(px(8.))
+            .font_weight(if selected {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(if selected { rgb(TEXT) } else { rgb(MUTED) })
+            .cursor_pointer()
+            .hover(|style| style.border_color(rgb(BLUE)).text_color(rgb(TEXT)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.map_time_filter = filter;
+                this.map_custom_since = None;
+                this.map_time_input_error = None;
+                this.reconcile_map_selection();
+                this.center_map(window);
+                cx.notify();
+            }))
+            .child(label)
+    }
+
+    fn render_map_time_toolbar(&self, cx: &mut Context<Self>) -> Div {
+        let custom_selected = self.map_time_filter == ActivityTimeFilter::Custom;
+        let has_error = self.map_time_input_error.is_some();
+        div()
+            .h(px(MAP_TIME_TOOLBAR_HEIGHT))
+            .flex_none()
+            .px(px(22.))
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .border_b_1()
+            .border_color(rgb(LINE))
+            .bg(rgba(0x0e1511ee))
+            .child(
+                div()
+                    .mr(px(4.))
+                    .text_size(px(8.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(FAINT))
+                    .child("LAST ACTIVITY"),
+            )
+            .child(self.render_map_time_filter("All time", ActivityTimeFilter::All, cx))
+            .child(self.render_map_time_filter("1h", ActivityTimeFilter::Hour, cx))
+            .child(self.render_map_time_filter("1d", ActivityTimeFilter::Day, cx))
+            .child(self.render_map_time_filter("1w", ActivityTimeFilter::Week, cx))
+            .child(self.render_map_time_filter("1mo", ActivityTimeFilter::Month, cx))
+            .child(
+                div()
+                    .mx(px(5.))
+                    .h(px(20.))
+                    .border_l_1()
+                    .border_color(rgb(LINE)),
+            )
+            .child(
+                div()
+                    .text_size(px(8.))
+                    .text_color(rgb(FAINT))
+                    .child("Since"),
+            )
+            .child(
+                div()
+                    .w(px(145.))
+                    .flex_none()
+                    .child(self.map_time_input.clone()),
+            )
+            .child(
+                div()
+                    .id("apply-map-custom-time")
+                    .h(px(24.))
+                    .px(px(9.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(if has_error {
+                        rgb(DANGER)
+                    } else if custom_selected {
+                        rgb(BLUE)
+                    } else {
+                        rgb(LINE)
+                    })
+                    .bg(if custom_selected {
+                        rgba(0x7db8c91c)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .text_size(px(8.))
+                    .text_color(if custom_selected {
+                        rgb(TEXT)
+                    } else {
+                        rgb(MUTED)
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.border_color(rgb(BLUE)).text_color(rgb(TEXT)))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let value = this.map_time_input.read(cx).text();
+                        this.apply_custom_time_filter(&value);
+                        if this.map_time_input_error.is_none() {
+                            this.center_map(window);
+                        }
+                        cx.notify();
+                    }))
+                    .child("Apply"),
+            )
+            .when_some(self.map_time_input_error.clone(), |toolbar, error| {
+                toolbar.child(
+                    div()
+                        .ml(px(4.))
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_size(px(8.))
+                        .text_color(rgb(DANGER))
+                        .child(error),
+                )
+            })
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(8.))
+                    .text_color(rgb(FAINT))
+                    .child("Updated at or after · local time"),
+            )
     }
 
     fn render_view_mode_button(
@@ -1075,7 +1284,11 @@ impl Grove {
             .hover(|style| style.text_color(rgb(TEXT)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.provider_filter = filter;
-                let visible_sessions = this.status_filtered_sessions();
+                let visible_sessions = if this.view_mode == ViewMode::Map {
+                    this.map_filtered_sessions()
+                } else {
+                    this.filtered_sessions()
+                };
                 if this.selected_id.as_ref().is_none_or(|selected_id| {
                     !visible_sessions
                         .iter()
@@ -1553,7 +1766,7 @@ impl Grove {
         let layout = scaled_mind_map_layout(self.current_map_layout(), self.map_zoom);
         let edges = layout.edges.clone();
         let map_zoom = self.map_zoom;
-        let filtered_sessions = self.status_filtered_sessions();
+        let filtered_sessions = self.map_filtered_sessions();
         let session_count = filtered_sessions.len();
         let subagent_count: usize = filtered_sessions
             .iter()
@@ -1570,7 +1783,7 @@ impl Grove {
             .bg(rgb(BG))
             .child(
                 div()
-                    .h(px(58.))
+                    .h(px(MAP_HEADER_HEIGHT))
                     .flex_none()
                     .px(px(22.))
                     .flex()
@@ -1714,6 +1927,7 @@ impl Grove {
                             .child("Space + drag canvas · Drag node · ⌘Scroll zoom"),
                     ),
             )
+            .child(self.render_map_time_toolbar(cx))
             .child(
                 div()
                     .id("mind-map-scroll")
@@ -2530,7 +2744,7 @@ impl Grove {
 
         div()
             .absolute()
-            .top(px(58.))
+            .top(px(MAP_OVERLAY_TOP))
             .right(px(0.))
             .bottom(px(0.))
             .w(px(340.))
@@ -3992,6 +4206,62 @@ fn session_matches_provider_filter(session: &CodingSession, filter: ProviderFilt
     }
 }
 
+fn session_matches_activity_time_filter(
+    session: &CodingSession,
+    filter: ActivityTimeFilter,
+    now: DateTime<Utc>,
+    custom_since: Option<&DateTime<Utc>>,
+) -> bool {
+    if filter == ActivityTimeFilter::All {
+        return true;
+    }
+    let Ok(updated_at) = DateTime::parse_from_rfc3339(&session.updated_at) else {
+        return false;
+    };
+    let updated_at = updated_at.with_timezone(&Utc);
+    match filter {
+        ActivityTimeFilter::All => true,
+        ActivityTimeFilter::Custom => custom_since.is_some_and(|cutoff| updated_at >= *cutoff),
+        ActivityTimeFilter::Hour
+        | ActivityTimeFilter::Day
+        | ActivityTimeFilter::Week
+        | ActivityTimeFilter::Month => {
+            let max_age_seconds = match filter {
+                ActivityTimeFilter::Hour => 60 * 60,
+                ActivityTimeFilter::Day => 24 * 60 * 60,
+                ActivityTimeFilter::Week => 7 * 24 * 60 * 60,
+                ActivityTimeFilter::Month => 30 * 24 * 60 * 60,
+                ActivityTimeFilter::All | ActivityTimeFilter::Custom => unreachable!(),
+            };
+            (now - updated_at).num_seconds().max(0) <= max_age_seconds
+        }
+    }
+}
+
+fn parse_custom_activity_cutoff(raw: &str) -> Result<DateTime<Utc>, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err("Enter a date or date and time".into());
+    }
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
+        return Ok(timestamp.with_timezone(&Utc));
+    }
+    let local_datetime = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M")
+        .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M"))
+        .ok()
+        .or_else(|| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+        })
+        .ok_or_else(|| "Use YYYY-MM-DD or YYYY-MM-DD HH:mm".to_owned())?;
+    Local
+        .from_local_datetime(&local_datetime)
+        .single()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .ok_or_else(|| "That local time is ambiguous or unavailable".into())
+}
+
 fn status_color(status: SessionStatus) -> Hsla {
     match status {
         SessionStatus::Active => rgb(GREEN).into(),
@@ -4198,6 +4468,105 @@ mod tests {
             vec!["claude-session"]
         );
         assert_eq!(matching_ids(ProviderFilter::Codex), vec!["codex-session"]);
+    }
+
+    #[test]
+    fn activity_time_filters_use_updated_at_and_include_the_boundary() {
+        let now = DateTime::parse_from_rfc3339("2026-08-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let session_at_age = |seconds: i64| CodingSession {
+            id: format!("age-{seconds}"),
+            provider: CodingAgent::Codex,
+            title: "Recent session".into(),
+            project_name: "grove".into(),
+            cwd: "/Users/mai/grove".into(),
+            git_branch: None,
+            slug: None,
+            status: SessionStatus::Idle,
+            updated_at: (now - chrono::Duration::seconds(seconds)).to_rfc3339(),
+            started_at: Some("2020-01-01T00:00:00Z".into()),
+            message_count: 1,
+            last_prompt: None,
+            last_tool: None,
+            activities: vec![],
+            subagents: vec![],
+        };
+        for (filter, max_age) in [
+            (ActivityTimeFilter::Hour, 60 * 60),
+            (ActivityTimeFilter::Day, 24 * 60 * 60),
+            (ActivityTimeFilter::Week, 7 * 24 * 60 * 60),
+            (ActivityTimeFilter::Month, 30 * 24 * 60 * 60),
+        ] {
+            assert!(session_matches_activity_time_filter(
+                &session_at_age(max_age),
+                filter,
+                now,
+                None
+            ));
+            assert!(!session_matches_activity_time_filter(
+                &session_at_age(max_age + 1),
+                filter,
+                now,
+                None
+            ));
+        }
+        assert!(session_matches_activity_time_filter(
+            &session_at_age(-86_400),
+            ActivityTimeFilter::Hour,
+            now,
+            None
+        ));
+    }
+
+    #[test]
+    fn custom_activity_filter_accepts_local_dates_and_rejects_invalid_input() {
+        let cutoff = parse_custom_activity_cutoff("2026-08-04T12:00:00Z").unwrap();
+        let session = |updated_at: &str| CodingSession {
+            id: updated_at.into(),
+            provider: CodingAgent::ClaudeCode,
+            title: "Custom range".into(),
+            project_name: "grove".into(),
+            cwd: "/Users/mai/grove".into(),
+            git_branch: None,
+            slug: None,
+            status: SessionStatus::Idle,
+            updated_at: updated_at.into(),
+            started_at: None,
+            message_count: 1,
+            last_prompt: None,
+            last_tool: None,
+            activities: vec![],
+            subagents: vec![],
+        };
+
+        assert!(session_matches_activity_time_filter(
+            &session("2026-08-04T12:00:00Z"),
+            ActivityTimeFilter::Custom,
+            cutoff,
+            Some(&cutoff)
+        ));
+        assert!(!session_matches_activity_time_filter(
+            &session("2026-08-04T11:59:59Z"),
+            ActivityTimeFilter::Custom,
+            cutoff,
+            Some(&cutoff)
+        ));
+        assert!(parse_custom_activity_cutoff("2026-08-04").is_ok());
+        assert!(parse_custom_activity_cutoff("2026-08-04 09:30").is_ok());
+        assert!(parse_custom_activity_cutoff("not-a-date").is_err());
+        assert!(!session_matches_activity_time_filter(
+            &session("invalid"),
+            ActivityTimeFilter::Hour,
+            cutoff,
+            None
+        ));
+        assert!(session_matches_activity_time_filter(
+            &session("invalid"),
+            ActivityTimeFilter::All,
+            cutoff,
+            None
+        ));
     }
 
     #[test]
